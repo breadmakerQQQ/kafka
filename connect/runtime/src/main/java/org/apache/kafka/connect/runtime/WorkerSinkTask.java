@@ -226,6 +226,7 @@ class WorkerSinkTask extends WorkerTask {
 
             // And process messages
             long timeoutMs = Math.max(nextCommit - now, 0);
+            // Jacob 赶在下一次commit提前消费位移前, 拉取并消费sink消息
             poll(timeoutMs);
         } catch (WakeupException we) {
             log.trace("{} Consumer woken up", this);
@@ -319,6 +320,9 @@ class WorkerSinkTask extends WorkerTask {
 
         log.trace("{} Polling consumer with timeout {} ms", this, timeoutMs);
         ConsumerRecords<byte[], byte[]> msgs = pollConsumer(timeoutMs);
+        // Jacob msgs不为空, 即拉取到了一批新的消息继续正常消费
+        // Jacob messageBatch不为空, 由于sink失败抛出接住RetriableException, 旧messageBatch未被clear重新消费
+        // 同时重试时会调用consumer#pause(), 使得所有poll拉取到的数据均为空
         assert messageBatch.isEmpty() || msgs.isEmpty();
         log.trace("{} Polling returned {} messages", this, msgs.count());
 
@@ -386,6 +390,7 @@ class WorkerSinkTask extends WorkerTask {
         final Map<TopicPartition, OffsetAndMetadata> taskProvidedOffsets;
         try {
             log.trace("{} Calling task.preCommit with current offsets: {}", this, currentOffsets);
+            // Jacob 通过#preCommit()扩展点, Task可以实现任务自定义位移提交
             taskProvidedOffsets = task.preCommit(new HashMap<>(currentOffsets));
         } catch (Throwable t) {
             if (closing) {
@@ -408,6 +413,7 @@ class WorkerSinkTask extends WorkerTask {
             }
         }
 
+        // Jacob #preCommit()返回为空, 跳过此次位移提交
         if (taskProvidedOffsets.isEmpty()) {
             log.debug("{} Skipping offset commit, task opted-out by returning no offsets from preCommit", this);
             onCommitCompleted(null, commitSeqno, null);
@@ -421,6 +427,7 @@ class WorkerSinkTask extends WorkerTask {
             if (commitableOffsets.containsKey(partition)) {
                 long taskOffset = taskProvidedOffset.offset();
                 long currentOffset = currentOffsets.get(partition).offset();
+                // Jacob 用户提供的位移小于框架维护的位移, 做覆盖
                 if (taskOffset <= currentOffset) {
                     commitableOffsets.put(partition, taskProvidedOffset);
                 } else {
@@ -432,6 +439,7 @@ class WorkerSinkTask extends WorkerTask {
                         this, partition, taskProvidedOffset, consumer.assignment());
             }
         }
+        // Jacob 其实最终得到的可以提交的位移commitableOffsets完全取决于用户提供, 即调用完#preCommit()得到的位移
 
         if (commitableOffsets.equals(lastCommittedOffsets)) {
             log.debug("{} Skipping offset commit, no change since last commit", this);
@@ -560,6 +568,7 @@ class WorkerSinkTask extends WorkerTask {
             // Since we reuse the messageBatch buffer, ensure we give the task its own copy
             log.trace("{} Delivering batch of {} messages to task", this, messageBatch.size());
             long start = time.milliseconds();
+            // Jacob 传入拷贝的原因是考虑到SinkTask可能做异步直接返回, 框架用messageBatch存储下一批消息数据了
             task.put(new ArrayList<>(messageBatch));
             // if errors raised from the operator were swallowed by the task implementation, an
             // exception needs to be thrown to kill the task indicating the tolerance was exceeded
@@ -578,14 +587,20 @@ class WorkerSinkTask extends WorkerTask {
                     resumeAll();
                 pausedForRedelivery = false;
             }
-        } catch (RetriableException e) {
+        }
+        // Jacob 接住RetriableException, 暂停所有拉取动作, 重试这一批数据sink
+        catch (RetriableException e) {
             log.error("{} RetriableException from SinkTask:", this, e);
             // If we're retrying a previous batch, make sure we've paused all topic partitions so we don't get new data,
             // but will still be able to poll in order to handle user-requested timeouts, keep group membership, etc.
+
+            // Jacob 暂停所有订阅分区, 暂停后使用poll()将无法拉取到新数据, 但仍然会在每次循环中调用poll()方法, 以防止被踢出消费者组
             pausedForRedelivery = true;
             pauseAll();
             // Let this exit normally, the batch will be reprocessed on the next loop.
-        } catch (Throwable t) {
+        }
+        // Jacob 其他异常将直接抛到最外层导致任务直接停止
+        catch (Throwable t) {
             log.error("{} Task threw an uncaught and unrecoverable exception. Task is being killed and will not "
                     + "recover until manually restarted. Error: {}", this, t.getMessage(), t);
             throw new ConnectException("Exiting WorkerSinkTask due to unrecoverable exception.", t);

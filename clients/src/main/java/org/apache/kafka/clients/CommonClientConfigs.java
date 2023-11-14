@@ -122,6 +122,8 @@ public class CommonClientConfigs {
                                                        + "This can be used in combination with a larger session timeout to avoid group rebalances caused by transient unavailability "
                                                        + "(e.g. process restarts). If not set, the consumer will join the group as a dynamic member, which is the traditional behavior.";
 
+
+    // Jacob 最大poll间隔, 超过这个时间没有进行下一次poll, 将被视为挂掉, 被Kafka踢出消费者组(将该消费者的分区重分配给其他消费者)
     public static final String MAX_POLL_INTERVAL_MS_CONFIG = "max.poll.interval.ms";
     public static final String MAX_POLL_INTERVAL_MS_DOC = "The maximum delay between invocations of poll() when using "
                                                           + "consumer group management. This places an upper bound on the amount of time that the consumer can be idle "
